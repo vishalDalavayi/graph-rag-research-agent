@@ -66,12 +66,27 @@ type SourcesResponse = {
   chunks: ChunkSourceItem[];
 };
 
-type AskResponse = { answer: string; sources: SourcesResponse };
+type CitationItem = {
+  citation_id: number;
+  source_type: string;
+  source_id: string;
+  page: number | null;
+  text: string;
+};
+
+type AskResponse = {
+  answer: string;
+  citations: CitationItem[];
+  citation_valid: boolean;
+  sources: SourcesResponse;
+};
 
 type ChatMessage = {
   id: string;
   question: string;
   answer: string;
+  citations: CitationItem[];
+  citationValid: boolean;
   graphSources: SourceItem[];
   chunkSources: ChunkSourceItem[];
 };
@@ -210,9 +225,10 @@ export default function HomePage() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [nodes, setNodes] = useState<Node<EntityNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
-  const [status, setStatus] = useState<string>("Loading…");
+  const [status, setStatus] = useState<string>("Upload a PDF to get started.");
   const [statusIsError, setStatusIsError] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [documentReady, setDocumentReady] = useState(false);
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -324,6 +340,7 @@ export default function HomePage() {
           );
         }
         setChatMessages([]);
+        setDocumentReady(true);
         setStatusIsError(false);
         setStatus(
           `Processed ${body.chunks_processed} chunks → ${body.nodes} nodes, ${body.edges} edges (${body.elapsed_seconds ?? "?"}s). Loading graph…`
@@ -352,10 +369,6 @@ export default function HomePage() {
     },
     [uploadPdf]
   );
-
-  useEffect(() => {
-    void loadGraph();
-  }, [loadGraph]);
 
   const askQuestion = useCallback(async () => {
     const q = question.trim();
@@ -386,6 +399,8 @@ export default function HomePage() {
           id: `${Date.now()}-${prev.length}`,
           question: q,
           answer: result.answer,
+          citations: result.citations ?? [],
+          citationValid: result.citation_valid ?? true,
           graphSources: result.sources?.graph_edges ?? [],
           chunkSources: result.sources?.chunks ?? [],
         },
@@ -397,6 +412,8 @@ export default function HomePage() {
           id: `${Date.now()}-${prev.length}`,
           question: q,
           answer: formatFetchError(err, API_URL, "Failed to get an answer"),
+          citations: [],
+          citationValid: false,
           graphSources: [],
           chunkSources: [],
         },
@@ -411,7 +428,7 @@ export default function HomePage() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages, asking]);
 
-  const hasGraph = nodes.length > 0;
+  const hasGraph = documentReady && nodes.length > 0;
 
   const legend = useMemo(
     () =>
@@ -439,9 +456,9 @@ export default function HomePage() {
     <div style={styles.page}>
       <header style={styles.header}>
         <div>
-          <h1 style={styles.title}>Graph RAG Research Agent</h1>
+          <h1 style={styles.title}>Ask My Docs</h1>
           <p style={styles.subtitle}>
-            Upload a PDF · Extract entities & relationships · Explore the graph
+            Hybrid Graph RAG · BM25 + vector search · cross-encoder reranking · cited answers
           </p>
         </div>
         <div style={styles.actions}>
@@ -480,6 +497,22 @@ export default function HomePage() {
                 <div style={styles.userBubble}>{msg.question}</div>
                 <div style={styles.answerCard}>
                   <p style={styles.answerText}>{msg.answer}</p>
+                  {!msg.citationValid && (
+                    <p style={styles.citationWarning}>Citation check: some claims may lack valid [n] markers.</p>
+                  )}
+                  <CollapsibleSources title="Citations" count={msg.citations.length}>
+                    <ul style={styles.sourcesList}>
+                      {msg.citations.map((c) => (
+                        <li key={c.citation_id} style={styles.sourceItem}>
+                          <span style={styles.sourceRel}>[{c.citation_id}] {c.source_type}</span>
+                          {c.page != null && (
+                            <span style={styles.sourceType}> · page {c.page}</span>
+                          )}
+                          <p style={styles.sourceEvidence}>&ldquo;{c.text.slice(0, 300)}{c.text.length > 300 ? "…" : ""}&rdquo;</p>
+                        </li>
+                      ))}
+                    </ul>
+                  </CollapsibleSources>
                   <CollapsibleSources title="Graph sources" count={msg.graphSources.length}>
                     <ul style={styles.sourcesList}>
                       {msg.graphSources.map((s) => (
@@ -538,7 +571,7 @@ export default function HomePage() {
           />
           <button
             style={styles.btnAsk}
-            disabled={asking || uploading || !question.trim() || !hasGraph}
+            disabled={asking || uploading || !documentReady || !question.trim()}
             onClick={askQuestion}
           >
             {asking ? "…" : "Ask"}
@@ -729,6 +762,11 @@ const styles: Record<string, CSSProperties> = {
     fontSize: 15,
     lineHeight: 1.6,
     color: "#e8edf5",
+  },
+  citationWarning: {
+    margin: "8px 0 0",
+    fontSize: 12,
+    color: "#fbbf24",
   },
   sourcesDetails: {
     marginTop: 12,

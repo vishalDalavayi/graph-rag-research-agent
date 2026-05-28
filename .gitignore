@@ -1,9 +1,13 @@
 # Python
 backend/.venv/
 backend/__pycache__/
+backend/**/__pycache__/
+backend/.pytest_cache/
 backend/.env
 backend/data/graph.json
 backend/data/chunks.json
+backend/data/passages.json
+backend/data/embeddings.npz
 
 # Node
 frontend/node_modules/

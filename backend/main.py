@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field
 from extractor import chunk_pages, extract_pages_from_pdf
 from graph_builder import build_graph_from_chunks
 from qa import answer_question
-from storage import load_chunks, load_graph, save_chunks, save_graph
+from retrieval_index import build_retrieval_index, load_retrieval_index
+from storage import clear_document_data, load_chunks, load_graph, save_chunks, save_graph
 
 # Always load backend/.env (override shell env so old placeholders don't win)
 load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
@@ -46,6 +47,8 @@ class SourcesResponse(BaseModel):
 
 class AskResponse(BaseModel):
     answer: str
+    citations: list[dict] = Field(default_factory=list)
+    citation_valid: bool = True
     sources: SourcesResponse
 
 logging.basicConfig(
@@ -55,7 +58,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Graph RAG Research Agent", version="0.2.0")
+app = FastAPI(title="Ask My Docs", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -85,8 +88,11 @@ def health():
 
     return {
         "status": "ok",
+        "product": "Ask My Docs",
         "llm": "groq",
         "model": "llama-3.3-70b-versatile",
+        "embedding_model": "all-MiniLM-L6-v2 (local sentence-transformers)",
+        "retrieval": "bm25+vector+rrf+cross-encoder",
         "groq_api_key_configured": key_ok,
         "groq_api_key_message": key_message,
     }
@@ -133,15 +139,25 @@ async def upload_pdf(file: UploadFile = File(...)):
         logger.exception("Graph extraction failed")
         raise HTTPException(status_code=500, detail=f"Graph extraction failed: {exc}") from exc
 
-    save_graph(graph)
-    save_chunks(chunks)
+    try:
+        index_meta = build_retrieval_index(chunks, graph)
+        save_graph(graph)
+        save_chunks(chunks)
+    except Exception as exc:
+        logger.exception("Retrieval index build failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Retrieval index build failed: {exc}",
+        ) from exc
+
     elapsed = time.perf_counter() - t0
 
     logger.info(
-        "Upload complete in %.1fs — %d nodes, %d edges",
+        "Upload complete in %.1fs — %d nodes, %d edges, %d passages",
         elapsed,
         len(graph["nodes"]),
         len(graph["edges"]),
+        index_meta.get("passage_count", 0),
     )
 
     return {
@@ -149,6 +165,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         "chunks_processed": len(chunks),
         "nodes": len(graph["nodes"]),
         "edges": len(graph["edges"]),
+        "passages_indexed": index_meta.get("passage_count", 0),
         "elapsed_seconds": round(elapsed, 2),
     }
 
@@ -164,6 +181,14 @@ def get_graph():
     return graph
 
 
+@app.delete("/document")
+def clear_document():
+    """Remove all stored document data (graph, chunks, retrieval index)."""
+    clear_document_data()
+    logger.info("Cleared all document data")
+    return {"message": "Document data cleared. Upload a PDF to start fresh."}
+
+
 @app.post("/ask", response_model=AskResponse)
 def ask(body: AskRequest):
     logger.info("Ask: %s", body.question[:120])
@@ -176,9 +201,22 @@ def ask(body: AskRequest):
     if chunks is None:
         raise HTTPException(status_code=404, detail="No chunks found. Upload a PDF first.")
 
+    retrieval_index = load_retrieval_index()
+    if retrieval_index is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Retrieval index not found. Re-upload your PDF to rebuild BM25/vector index.",
+        )
+
     try:
         history = [{"question": t.question, "answer": t.answer} for t in body.history]
-        result = answer_question(graph, body.question, chunks=chunks, history=history)
+        result = answer_question(
+            graph,
+            body.question,
+            chunks=chunks,
+            history=history,
+            retrieval_index=retrieval_index,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

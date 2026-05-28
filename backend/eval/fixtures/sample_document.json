@@ -1,0 +1,49 @@
+{
+  "chunks": [
+    {
+      "id": "chunk_001",
+      "text": "Alice Chen founded Acme Corp in 2019. She leads the platform engineering team.",
+      "page": 1
+    },
+    {
+      "id": "chunk_002",
+      "text": "Acme Corp uses Python, FastAPI, and PostgreSQL for its document search platform.",
+      "page": 2
+    }
+  ],
+  "graph": {
+    "nodes": [
+      {"id": "alice_chen", "label": "Alice Chen", "type": "PERSON"},
+      {"id": "acme_corp", "label": "Acme Corp", "type": "ORG"},
+      {"id": "python", "label": "Python", "type": "TECH"}
+    ],
+    "edges": [
+      {
+        "id": "e_founded",
+        "source": "alice_chen",
+        "target": "acme_corp",
+        "label": "founded",
+        "evidence": "Alice Chen founded Acme Corp in 2019"
+      },
+      {
+        "id": "e_uses",
+        "source": "acme_corp",
+        "target": "python",
+        "label": "uses",
+        "evidence": "Acme Corp uses Python, FastAPI, and PostgreSQL"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "question": "Who founded Acme Corp?",
+      "expected_substrings": ["Alice", "2019"],
+      "must_cite": true
+    },
+    {
+      "question": "What technologies does Acme use?",
+      "expected_substrings": ["Python"],
+      "must_cite": true
+    }
+  ]
+}

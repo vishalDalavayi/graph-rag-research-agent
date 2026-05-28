@@ -48,3 +48,17 @@ def load_chunks() -> list[dict] | None:
         return None
     logger.debug("Loaded %d chunks from %s", len(chunks), CHUNKS_PATH)
     return chunks
+
+
+def clear_document_data() -> None:
+    """Delete persisted graph, chunks, and retrieval index."""
+    for path in (GRAPH_PATH, CHUNKS_PATH):
+        if path.exists():
+            path.unlink()
+            logger.info("Removed %s", path)
+    from retrieval_index import EMBEDDINGS_PATH, PASSAGES_PATH
+
+    for path in (PASSAGES_PATH, EMBEDDINGS_PATH):
+        if path.exists():
+            path.unlink()
+            logger.info("Removed %s", path)
