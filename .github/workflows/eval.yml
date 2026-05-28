@@ -28,8 +28,16 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
 
-      - name: Unit tests (retrieval + citations)
+      - name: Unit tests (retrieval, citations, observability)
         run: pytest eval/tests/ -v --tb=short
 
-      - name: Offline eval pipeline (CI gate)
+      - name: Offline eval + regression gate
         run: python eval/run_eval.py --offline --min-score 0.75
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: backend/eval/last_report.json
+          if-no-files-found: ignore

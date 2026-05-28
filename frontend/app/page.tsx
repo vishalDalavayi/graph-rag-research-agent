@@ -74,11 +74,18 @@ type CitationItem = {
   text: string;
 };
 
+type AskMetrics = {
+  cost_usd?: number;
+  stages_ms?: Record<string, number>;
+  groq_tokens?: { prompt: number; completion: number };
+};
+
 type AskResponse = {
   answer: string;
   citations: CitationItem[];
   citation_valid: boolean;
   sources: SourcesResponse;
+  metrics?: AskMetrics;
 };
 
 type ChatMessage = {
@@ -89,6 +96,7 @@ type ChatMessage = {
   citationValid: boolean;
   graphSources: SourceItem[];
   chunkSources: ChunkSourceItem[];
+  metrics?: AskMetrics;
 };
 
 type EntityNodeData = { label: string; type: string };
@@ -156,6 +164,17 @@ function formatFetchError(err: unknown, apiUrl: string, fallback: string): strin
     return `Cannot reach the backend at ${apiUrl}. Start it with: cd backend && uvicorn main:app --reload --port 8000`;
   }
   return err instanceof Error ? err.message : fallback;
+}
+
+function formatRequestMetrics(metrics?: AskMetrics): string | null {
+  if (!metrics) return null;
+  const stages = metrics.stages_ms ?? {};
+  const totalMs = Object.values(stages).reduce((a, b) => a + b, 0);
+  const cost = metrics.cost_usd;
+  const parts: string[] = [];
+  if (totalMs > 0) parts.push(`${Math.round(totalMs)}ms`);
+  if (cost != null && cost > 0) parts.push(`$${cost.toFixed(5)}`);
+  return parts.length ? parts.join(" · ") : null;
 }
 
 function formatApiError(detail: unknown, fallback: string): string {
@@ -343,11 +362,13 @@ export default function HomePage() {
         setDocumentReady(true);
         setStatusIsError(false);
         setStatus(
-          `Processed ${body.chunks_processed} chunks → ${body.nodes} nodes, ${body.edges} edges (${body.elapsed_seconds ?? "?"}s). Loading graph…`
+          `Processed ${body.chunks_processed} chunks → ${body.nodes} nodes, ${body.edges} edges. Loading graph…`
         );
+        const uploadMetrics = body.metrics as AskMetrics | undefined;
+        const uploadMeta = formatRequestMetrics(uploadMetrics);
         await loadGraph({ quiet: true });
         setStatus(
-          `Ready — ${body.nodes} nodes, ${body.edges} edges from ${file.name}. Ask a question below.`
+          `Ready — ${body.nodes} nodes, ${body.edges} edges from ${file.name}.${uploadMeta ? ` (${uploadMeta})` : ""} Ask a question below.`
         );
       } catch (err) {
         setStatusIsError(true);
@@ -403,6 +424,7 @@ export default function HomePage() {
           citationValid: result.citation_valid ?? true,
           graphSources: result.sources?.graph_edges ?? [],
           chunkSources: result.sources?.chunks ?? [],
+          metrics: result.metrics,
         },
       ]);
     } catch (err) {
@@ -497,6 +519,9 @@ export default function HomePage() {
                 <div style={styles.userBubble}>{msg.question}</div>
                 <div style={styles.answerCard}>
                   <p style={styles.answerText}>{msg.answer}</p>
+                  {formatRequestMetrics(msg.metrics) && (
+                    <p style={styles.metricsLine}>{formatRequestMetrics(msg.metrics)}</p>
+                  )}
                   {!msg.citationValid && (
                     <p style={styles.citationWarning}>Citation check: some claims may lack valid [n] markers.</p>
                   )}
@@ -767,6 +792,12 @@ const styles: Record<string, CSSProperties> = {
     margin: "8px 0 0",
     fontSize: 12,
     color: "#fbbf24",
+  },
+  metricsLine: {
+    margin: "6px 0 0",
+    fontSize: 11,
+    color: "#64748b",
+    fontFamily: "ui-monospace, monospace",
   },
   sourcesDetails: {
     marginTop: 12,

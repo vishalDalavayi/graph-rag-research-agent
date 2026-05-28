@@ -1,15 +1,15 @@
 import logging
-import os
 import re
 import uuid
 
 from groq import Groq
 
+from groq_client import GROQ_MODEL, get_groq_client, validate_groq_api_key
+from groq_llm import chat_completion
 from json_parser import parse_extraction_json
 
 logger = logging.getLogger(__name__)
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
 ENTITY_TYPES = {"PERSON", "ORG", "PRODUCT", "TECH", "CONCEPT", "LOCATION", "OTHER"}
 
 EXTRACTION_PROMPT = """Extract entities and relationships from the text chunk below.
@@ -47,38 +47,18 @@ def _slugify(label: str) -> str:
     return slug or f"entity_{uuid.uuid4().hex[:8]}"
 
 
-def validate_groq_api_key() -> None:
-    """Raise if GROQ_API_KEY is missing or still a placeholder."""
-    from pathlib import Path
-    from dotenv import load_dotenv
-
-    load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
-
-    api_key = (os.getenv("GROQ_API_KEY") or "").strip().strip('"').strip("'")
-    if not api_key:
-        raise ValueError(
-            "GROQ_API_KEY is not set. Add it to backend/.env and restart the server."
-        )
-    if api_key == "gsk_your-key-here" or len(api_key) < 20:
-        raise ValueError(
-            "GROQ_API_KEY in backend/.env still looks like a placeholder. "
-            "Save your full gsk_... key and restart uvicorn."
-        )
-
-
-def _get_groq_client() -> Groq:
-    validate_groq_api_key()
-    api_key = (os.getenv("GROQ_API_KEY") or "").strip().strip('"').strip("'")
-    return Groq(api_key=api_key)
-
-
-def extract_from_chunk(client: Groq, chunk: str, chunk_index: int) -> dict:
+def extract_from_chunk(
+    client: Groq,
+    chunk: str,
+    chunk_index: int,
+    trace_ctx: dict | None = None,
+) -> dict:
     logger.info("Chunk %d: calling Groq model=%s (%d chars)", chunk_index, GROQ_MODEL, len(chunk))
+    ctx = trace_ctx if trace_ctx is not None else {}
 
     try:
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
+        response = chat_completion(
+            [
                 {
                     "role": "system",
                     "content": (
@@ -88,6 +68,8 @@ def extract_from_chunk(client: Groq, chunk: str, chunk_index: int) -> dict:
                 },
                 {"role": "user", "content": EXTRACTION_PROMPT + chunk},
             ],
+            ctx,
+            operation=f"graph_extract_chunk_{chunk_index}",
             temperature=0.2,
             response_format={"type": "json_object"},
         )
@@ -202,9 +184,9 @@ def merge_and_build_graph(chunk_results: list[dict]) -> dict:
     }
 
 
-def build_graph_from_chunks(chunks: list[str]) -> dict:
+def build_graph_from_chunks(chunks: list[str], trace_ctx: dict | None = None) -> dict:
     validate_groq_api_key()
-    client = _get_groq_client()
+    client = get_groq_client()
     results: list[dict] = []
     failed_chunks = 0
     total = len([c for c in chunks if c.strip()])
@@ -216,7 +198,7 @@ def build_graph_from_chunks(chunks: list[str]) -> dict:
         if not chunk.strip():
             continue
         chunk_num += 1
-        extracted = extract_from_chunk(client, chunk, chunk_num)
+        extracted = extract_from_chunk(client, chunk, chunk_num, trace_ctx=trace_ctx)
         if extracted.get("_failed"):
             failed_chunks += 1
         results.append(extracted)

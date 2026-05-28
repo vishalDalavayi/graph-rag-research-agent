@@ -8,6 +8,7 @@ backend/data/graph.json
 backend/data/chunks.json
 backend/data/passages.json
 backend/data/embeddings.npz
+backend/eval/last_report.json
 
 # Node
 frontend/node_modules/

@@ -1,6 +1,7 @@
 import logging
-import time
 from pathlib import Path
+
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field
 from extractor import chunk_pages, extract_pages_from_pdf
 from graph_builder import build_graph_from_chunks
 from qa import answer_question
+from observability import document_session_id, flush_langfuse, metrics_store, trace_request, trace_stage
 from retrieval_index import build_retrieval_index, load_retrieval_index
 from storage import clear_document_data, load_chunks, load_graph, save_chunks, save_graph
 
@@ -50,6 +52,7 @@ class AskResponse(BaseModel):
     citations: list[dict] = Field(default_factory=list)
     citation_valid: bool = True
     sources: SourcesResponse
+    metrics: dict = Field(default_factory=dict)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,7 +61,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Ask My Docs", version="0.3.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    flush_langfuse()
+
+
+app = FastAPI(title="Ask My Docs", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -79,7 +89,7 @@ def health():
     key_ok = True
     key_message = None
     try:
-        from graph_builder import validate_groq_api_key
+        from groq_client import validate_groq_api_key
 
         validate_groq_api_key()
     except ValueError as exc:
@@ -95,7 +105,14 @@ def health():
         "retrieval": "bm25+vector+rrf+cross-encoder",
         "groq_api_key_configured": key_ok,
         "groq_api_key_message": key_message,
+        "langfuse_enabled": metrics_store.summary()["langfuse_enabled"],
     }
+
+
+@app.get("/metrics")
+def get_metrics():
+    """Latency percentiles (p50/p95), cost-per-request, and quality aggregates."""
+    return metrics_store.summary()
 
 
 @app.post("/upload")
@@ -109,65 +126,86 @@ async def upload_pdf(file: UploadFile = File(...)):
     if not content:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    logger.info("PDF size: %d bytes", len(content))
-    t0 = time.perf_counter()
+    with trace_request(
+        "upload_pdf",
+        input_data={"filename": file.filename, "bytes": len(content)},
+        tags=["ingestion"],
+        build_output=lambda ctx: {
+            "nodes": ctx.get("quality", {}).get("nodes"),
+            "edges": ctx.get("quality", {}).get("edges"),
+            "passages_indexed": ctx.get("quality", {}).get("passages_indexed"),
+            "cost_usd": round(ctx.get("cost_usd", 0.0), 6),
+            "stages_ms": ctx.get("stages", {}),
+        },
+    ) as trace_ctx:
+        logger.info("PDF size: %d bytes", len(content))
 
-    try:
-        pages = extract_pages_from_pdf(content)
-    except Exception as exc:
-        logger.exception("PDF extraction failed")
-        raise HTTPException(status_code=400, detail=f"Failed to read PDF: {exc}") from exc
+        try:
+            with trace_stage(trace_ctx, "extract_pdf"):
+                pages = extract_pages_from_pdf(content)
+        except Exception as exc:
+            logger.exception("PDF extraction failed")
+            raise HTTPException(status_code=400, detail=f"Failed to read PDF: {exc}") from exc
 
-    if not pages:
-        raise HTTPException(status_code=400, detail="No text could be extracted from PDF")
+        if not pages:
+            raise HTTPException(status_code=400, detail="No text could be extracted from PDF")
 
-    total_chars = sum(len(p["text"]) for p in pages)
-    logger.info("Extracted %d characters of text from %d pages", total_chars, len(pages))
+        total_chars = sum(len(p["text"]) for p in pages)
+        logger.info("Extracted %d characters of text from %d pages", total_chars, len(pages))
 
-    chunks = chunk_pages(pages)
-    if not chunks:
-        raise HTTPException(status_code=400, detail="No chunks produced from PDF text")
+        with trace_stage(trace_ctx, "chunk_pages"):
+            chunks = chunk_pages(pages)
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No chunks produced from PDF text")
 
-    logger.info("Created %d chunks (avg %d chars)", len(chunks), total_chars // max(len(chunks), 1))
+        logger.info(
+            "Created %d chunks (avg %d chars)",
+            len(chunks),
+            total_chars // max(len(chunks), 1),
+        )
 
-    try:
-        graph = build_graph_from_chunks([c["text"] for c in chunks])
-    except ValueError as exc:
-        logger.error("Configuration error: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Graph extraction failed")
-        raise HTTPException(status_code=500, detail=f"Graph extraction failed: {exc}") from exc
+        try:
+            with trace_stage(trace_ctx, "graph_extraction"):
+                graph = build_graph_from_chunks(
+                    [c["text"] for c in chunks],
+                    trace_ctx=trace_ctx,
+                )
+        except ValueError as exc:
+            logger.error("Configuration error: %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Graph extraction failed")
+            raise HTTPException(status_code=500, detail=f"Graph extraction failed: {exc}") from exc
 
-    try:
-        index_meta = build_retrieval_index(chunks, graph)
-        save_graph(graph)
-        save_chunks(chunks)
-    except Exception as exc:
-        logger.exception("Retrieval index build failed")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Retrieval index build failed: {exc}",
-        ) from exc
+        try:
+            with trace_stage(trace_ctx, "build_retrieval_index"):
+                index_meta = build_retrieval_index(chunks, graph)
+            save_graph(graph)
+            save_chunks(chunks)
+        except Exception as exc:
+            logger.exception("Retrieval index build failed")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Retrieval index build failed: {exc}",
+            ) from exc
 
-    elapsed = time.perf_counter() - t0
+        trace_ctx["quality"] = {
+            "nodes": len(graph["nodes"]),
+            "edges": len(graph["edges"]),
+            "passages_indexed": index_meta.get("passage_count", 0),
+        }
 
-    logger.info(
-        "Upload complete in %.1fs — %d nodes, %d edges, %d passages",
-        elapsed,
-        len(graph["nodes"]),
-        len(graph["edges"]),
-        index_meta.get("passage_count", 0),
-    )
-
-    return {
-        "message": "PDF processed successfully",
-        "chunks_processed": len(chunks),
-        "nodes": len(graph["nodes"]),
-        "edges": len(graph["edges"]),
-        "passages_indexed": index_meta.get("passage_count", 0),
-        "elapsed_seconds": round(elapsed, 2),
-    }
+        return {
+            "message": "PDF processed successfully",
+            "chunks_processed": len(chunks),
+            "nodes": len(graph["nodes"]),
+            "edges": len(graph["edges"]),
+            "passages_indexed": index_meta.get("passage_count", 0),
+            "metrics": {
+                "cost_usd": round(trace_ctx.get("cost_usd", 0.0), 6),
+                "stages_ms": trace_ctx.get("stages", {}),
+            },
+        }
 
 
 @app.get("/graph")
@@ -208,22 +246,45 @@ def ask(body: AskRequest):
             detail="Retrieval index not found. Re-upload your PDF to rebuild BM25/vector index.",
         )
 
-    try:
-        history = [{"question": t.question, "answer": t.answer} for t in body.history]
-        result = answer_question(
-            graph,
-            body.question,
-            chunks=chunks,
-            history=history,
-            retrieval_index=retrieval_index,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Q&A failed")
-        raise HTTPException(status_code=500, detail=f"Failed to answer question: {exc}") from exc
+    session_id = document_session_id(graph, chunks)
 
-    return result
+    def _ask_trace_output(ctx: dict) -> dict:
+        quality = ctx.get("quality", {})
+        return {
+            "answer_preview": (ctx.get("answer_preview") or "")[:500],
+            "citation_valid": quality.get("citation_valid"),
+            "source_count": quality.get("source_count"),
+            "retrieval_passage_count": quality.get("retrieval_passage_count"),
+            "cost_usd": round(ctx.get("cost_usd", 0.0), 6),
+            "stages_ms": ctx.get("stages", {}),
+        }
+
+    with trace_request(
+        "ask",
+        input_data={"question": body.question},
+        metadata={"history_turns": str(len(body.history))},
+        session_id=session_id,
+        tags=["rag", "qa"],
+        build_output=_ask_trace_output,
+    ) as trace_ctx:
+        try:
+            history = [{"question": t.question, "answer": t.answer} for t in body.history]
+            result = answer_question(
+                graph,
+                body.question,
+                chunks=chunks,
+                history=history,
+                retrieval_index=retrieval_index,
+                trace_ctx=trace_ctx,
+            )
+            trace_ctx["answer_preview"] = result.get("answer", "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Q&A failed")
+            raise HTTPException(status_code=500, detail=f"Failed to answer question: {exc}") from exc
+
+        return result
 
 
 if __name__ == "__main__":

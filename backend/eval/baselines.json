@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "min_score": 0.75,
+  "min_retrieval_hit_rate": 1.0,
+  "min_citation_fixture_pass_rate": 1.0,
+  "description": "Offline eval regression thresholds. Update only when intentionally changing retrieval/citation behavior."
+}
