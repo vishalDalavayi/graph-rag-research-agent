@@ -1,8 +1,8 @@
 # Ask My Docs
 
-Upload a PDF, build a knowledge graph, and ask grounded questions with **hybrid retrieval**, **citation enforcement**, **Langfuse tracing**, and a **CI-gated eval pipeline** — the production AI plumbing recruiters rarely see in portfolio projects.
+Upload a PDF, build a knowledge graph, and ask grounded questions with **hybrid retrieval**, **citation enforcement**, **Langfuse tracing**, and a **CI-gated eval pipeline** 
 
-Works with résumés, research papers, reports, manuals, and other text-based PDFs.
+Works with resumes, research papers, reports, manuals, and other text-based PDFs.
 
 ## Features
 
@@ -48,7 +48,7 @@ POST /ask
 | Storage | Local JSON + `.npz` embeddings |
 | CI | GitHub Actions, pytest, regression baselines |
 
-**Not used:** LangChain, LangGraph, Pinecone, Postgres.
+
 
 ## Project structure
 
